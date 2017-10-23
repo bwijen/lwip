@@ -114,6 +114,21 @@ close_handle(void)
   }
 }
 
+static struct pbuf*
+init_packet(int opcode, int extra, int size)
+{
+  struct pbuf* p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)(TFTP_HEADER_LENGTH + size), PBUF_RAM);
+  u16_t* payload;
+
+  if(p != NULL) {
+    payload = (u16_t*) p->payload;
+    payload[0] = PP_HTONS(opcode);
+    payload[1] = lwip_htons(extra);
+  }
+
+  return p;
+}
+
 static void
 send_error(const ip_addr_t *addr, u16_t port, enum tftp_error code, const char *str)
 {
@@ -121,14 +136,12 @@ send_error(const ip_addr_t *addr, u16_t port, enum tftp_error code, const char *
   struct pbuf* p;
   u16_t* payload;
   
-  p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)(TFTP_HEADER_LENGTH + str_length + 1), PBUF_RAM);
+  p = init_packet(TFTP_ERROR, code, str_length + 1);
   if(p == NULL) {
     return;
   }
 
   payload = (u16_t*) p->payload;
-  payload[0] = PP_HTONS(TFTP_ERROR);
-  payload[1] = lwip_htons(code);
   MEMCPY(&payload[2], str, str_length + 1);
 
   udp_sendto(tftp_state.upcb, p, addr, port);
@@ -136,25 +149,21 @@ send_error(const ip_addr_t *addr, u16_t port, enum tftp_error code, const char *
 }
 
 static void
-send_ack(u16_t blknum)
+send_ack(const ip_addr_t *addr, u16_t port, u16_t blknum)
 {
   struct pbuf* p;
-  u16_t* payload;
-  
-  p = pbuf_alloc(PBUF_TRANSPORT, TFTP_HEADER_LENGTH, PBUF_RAM);
+
+  p = init_packet(TFTP_ACK, blknum, 0);
   if(p == NULL) {
     return;
   }
-  payload = (u16_t*) p->payload;
-  
-  payload[0] = PP_HTONS(TFTP_ACK);
-  payload[1] = lwip_htons(blknum);
-  udp_sendto(tftp_state.upcb, p, &tftp_state.addr, tftp_state.port);
+
+  udp_sendto(tftp_state.upcb, p, addr, port);
   pbuf_free(p);
 }
 
 static void
-resend_data(void)
+resend_data(const ip_addr_t *addr, u16_t port)
 {
   struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, tftp_state.last_data->len, PBUF_RAM);
   if(p == NULL) {
@@ -166,12 +175,12 @@ resend_data(void)
     return;
   }
     
-  udp_sendto(tftp_state.upcb, p, &tftp_state.addr, tftp_state.port);
+  udp_sendto(tftp_state.upcb, p, addr, port);
   pbuf_free(p);
 }
 
 static void
-send_data(void)
+send_data(const ip_addr_t *addr, u16_t port)
 {
   u16_t *payload;
   int ret;
@@ -180,24 +189,22 @@ send_data(void)
     pbuf_free(tftp_state.last_data);
   }
   
-  tftp_state.last_data = pbuf_alloc(PBUF_TRANSPORT, TFTP_HEADER_LENGTH + TFTP_MAX_PAYLOAD_SIZE, PBUF_RAM);
+  tftp_state.last_data = init_packet(TFTP_DATA, tftp_state.blknum, TFTP_MAX_PAYLOAD_SIZE);
   if(tftp_state.last_data == NULL) {
     return;
   }
 
   payload = (u16_t *) tftp_state.last_data->payload;
-  payload[0] = PP_HTONS(TFTP_DATA);
-  payload[1] = lwip_htons(tftp_state.blknum);
 
   ret = tftp_state.ctx->read(tftp_state.handle, &payload[2], TFTP_MAX_PAYLOAD_SIZE);
   if (ret < 0) {
-    send_error(&tftp_state.addr, tftp_state.port, TFTP_ERROR_ACCESS_VIOLATION, "Error occured while reading the file.");
+    send_error(addr, port, TFTP_ERROR_ACCESS_VIOLATION, "Error occured while reading the file.");
     close_handle();
     return;
   }
 
   pbuf_realloc(tftp_state.last_data, (u16_t)(TFTP_HEADER_LENGTH + ret));
-  resend_data();
+  resend_data(addr, port);
 }
 
 static void
@@ -271,10 +278,10 @@ recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr, u16
 
       if (opcode == PP_HTONS(TFTP_WRQ)) {
         tftp_state.mode_write = 1;
-        send_ack(0);
+        send_ack(addr, port, 0);
       } else {
         tftp_state.mode_write = 0;
-        send_data();
+        send_data(addr, port);
       }
 
       break;
@@ -303,7 +310,7 @@ recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr, u16
         send_error(addr, port, TFTP_ERROR_ACCESS_VIOLATION, "error writing file");
         close_handle();
       } else {
-        send_ack(blknum);
+        send_ack(addr, port, blknum);
       }
 
       if (p->tot_len < TFTP_MAX_PAYLOAD_SIZE) {
@@ -341,7 +348,7 @@ recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr, u16
 
       if (!lastpkt) {
         tftp_state.blknum++;
-        send_data();
+        send_data(addr, port);
       } else {
         close_handle();
       }
@@ -373,7 +380,7 @@ tftp_tmr(void* arg)
   if ((tftp_state.timer - tftp_state.last_pkt) > (TFTP_TIMEOUT_MSECS / TFTP_TIMER_MSECS)) {
     if ((tftp_state.last_data != NULL) && (tftp_state.retries < TFTP_MAX_RETRIES)) {
       LWIP_DEBUGF(TFTP_DEBUG | LWIP_DBG_STATE, ("tftp: timeout, retrying\n"));
-      resend_data();
+      resend_data(&tftp_state.addr, tftp_state.port);
       tftp_state.retries++;
     } else {
       LWIP_DEBUGF(TFTP_DEBUG | LWIP_DBG_STATE, ("tftp: timeout\n"));
