@@ -44,6 +44,7 @@
 #include "lwip/apps/tftp_opts.h"
 #include "lwip/err.h"
 #include "lwip/pbuf.h"
+#include "lwip/ip_addr.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -83,9 +84,19 @@ struct tftp_context {
    * @returns &gt;= 0: Success; &lt; 0: Error
    */
   int (*write)(void* handle, struct pbuf* p);
+  /**
+   * Error response
+   * @param handle File handle set by tftp_get/tftp_put
+   * @param err error code from server
+   * @param msg error message from server
+   * @param size size of msg
+   */
+  void (*error)(void* handle, int err, const char* msg, int size);
 };
 
 err_t tftp_init(const struct tftp_context* ctx);
+err_t tftp_get(void* handle, const ip_addr_t *addr, u16_t port, const char* fname, const char* mode);
+err_t tftp_put(void* handle, const ip_addr_t *addr, u16_t port, const char* fname, const char* mode);
 
 #ifdef __cplusplus
 }

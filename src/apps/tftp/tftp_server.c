@@ -130,6 +130,25 @@ init_packet(int opcode, int extra, int size)
 }
 
 static void
+send_request(const ip_addr_t *addr, u16_t port, int opcode, const char* fname, const char* mode) {
+  size_t fname_length = strlen(fname)+1;
+  size_t mode_length = strlen(mode)+1;
+  struct pbuf* p = init_packet(opcode, 0, -2 + fname_length + mode_length);
+  char* payload;
+
+  if(p == NULL) {
+    return;
+  }
+
+  payload = (char*) p->payload;
+  MEMCPY(payload+2,              fname, fname_length);
+  MEMCPY(payload+2+fname_length, mode,  mode_length);
+
+  udp_sendto(tftp_state.upcb, p, addr, port);
+  pbuf_free(p);
+}
+
+static void
 send_error(const ip_addr_t *addr, u16_t port, enum tftp_error code, const char *str)
 {
   int str_length = strlen(str);
@@ -355,7 +374,13 @@ recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr, u16
 
       break;
     }
-    
+    case PP_HTONS(TFTP_ERROR):
+      if (tftp_state.handle != NULL) {
+        pbuf_header(p, -TFTP_HEADER_LENGTH);
+        tftp_state.ctx->error(tftp_state.handle, sbuf[1], p->payload, p->len);
+        close_handle();
+      }
+      break;
     default:
       send_error(addr, port, TFTP_ERROR_ILLEGAL_OPERATION, "Unknown operation");
       break;
@@ -418,6 +443,22 @@ tftp_init(const struct tftp_context *ctx)
 
   udp_recv(pcb, recv, NULL);
 
+  return ERR_OK;
+}
+
+err_t
+tftp_get(void* handle, const ip_addr_t *addr, u16_t port, const char* fname, const char* mode) {
+  tftp_state.handle = handle;
+  tftp_state.mode_write = 1; // We want to receive data
+  send_request(addr, port, TFTP_RRQ, fname, mode);
+  return ERR_OK;
+}
+
+err_t
+tftp_put(void* handle, const ip_addr_t *addr, u16_t port, const char* fname, const char* mode) {
+  tftp_state.handle = handle;
+  tftp_state.mode_write = 0; // We want to send data
+  send_request(addr, port, TFTP_WRQ, fname, mode);
   return ERR_OK;
 }
 
